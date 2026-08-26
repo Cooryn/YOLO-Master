@@ -3,6 +3,14 @@
 > 任务：STAL 式小目标自适应标签分配（面向 VisDrone 密集小目标场景）
 > 准入检查（8.24）：VisDrone 子集 1 epoch 冒烟 / 定位 assigner 与配置注入点 / 一条指标采集日志
 
+## 交付文件
+
+| 类别 | 文件 |
+|---|---|
+| 复现命令 | `A2/reproduce.sh`（一键）、`A2/smoke_test.py`（Python 脚本） |
+| 配置文件 | `A2/configs/visdrone-smoke.yaml`（数据集）、`A2/configs/args.yaml`（超参快照） |
+| 完整日志 | `A2/logs/train.log`（全量 stdout）、`A2/logs/results.csv`（指标 CSV） |
+
 ## 复现命令
 
 ```bash
