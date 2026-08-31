@@ -379,6 +379,11 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
+        # STAL P0: per-epoch positive-sample (foreground) statistics. Accumulated here because fg_mask is only
+        # available inside get_assigned_targets_and_loss; surfaced to the trainer via a callback reading these attrs.
+        self.fg_count = 0
+        self.fg_count_by_stride = {}
+
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
         nl, ne = targets.shape
@@ -438,6 +443,13 @@ class v8DetectionLoss:
             gt_bboxes,
             mask_gt,
         )
+
+        # STAL P0: count positives overall and per FPN level (stride is an area proxy: 8/16/32 -> small/medium/large).
+        self.fg_count += int(fg_mask.sum())
+        strides = stride_tensor.squeeze(-1)
+        for s in strides.unique():
+            key = int(s.item())
+            self.fg_count_by_stride[key] = self.fg_count_by_stride.get(key, 0) + int((fg_mask & (strides == s)).sum())
 
         target_scores_sum = max(target_scores.sum(), 1)
 
