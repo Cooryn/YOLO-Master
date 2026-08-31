@@ -11,14 +11,14 @@ repo's ``datasets/`` dir. This script is idempotent: if the val split already ex
 download and only re-verifies + re-writes the local YAML.
 
 Usage:
-    python P0/prepare_visdrone.py
+    python A2/P0/prepare_visdrone.py
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_YAML = REPO_ROOT / "datasets" / "VisDrone.yaml"
 
 # Expected split sizes from the VisDrone2019-DET config (test-dev only; test-challenge is skipped).

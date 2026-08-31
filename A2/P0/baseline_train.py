@@ -11,8 +11,8 @@ Registers two callbacks (without editing ``ultralytics/utils/callbacks/``, per p
   avoid polluting the next epoch's total.
 
 Usage:
-    python P0/baseline_train.py --epochs 100 --imgsz 640 --batch 16 --device 0   # full baseline
-    python P0/baseline_train.py --epochs 2 --imgsz 320 --batch 4                 # quick smoke
+    python A2/P0/baseline_train.py --epochs 100 --imgsz 640 --batch 16 --device 0   # full baseline
+    python A2/P0/baseline_train.py --epochs 2 --imgsz 320 --batch 4                 # quick smoke
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from pathlib import Path
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import unwrap_model
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_YAML = REPO_ROOT / "datasets" / "VisDrone.yaml"
 
 
@@ -61,7 +61,7 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--device", default="0")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--project", default=str(REPO_ROOT / "runs" / "p0"))
+    parser.add_argument("--project", default=str(REPO_ROOT / "runs" / "a2" / "p0"))
     parser.add_argument("--name", default="visdrone-baseline-yolo11n")
     args = parser.parse_args()
 

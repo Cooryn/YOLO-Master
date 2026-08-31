@@ -15,7 +15,7 @@ Tiering (pixel area of GT box; thresholds configurable):
     large  >= 96^2
 
 Usage:
-    python P0/tiered_eval.py --weights runs/p0/visdrone-baseline-yolo11n/weights/best.pt \
+    python A2/P0/tiered_eval.py --weights runs/a2/p0/visdrone-baseline-yolo11n/weights/best.pt \
                              --imgsz 640 --device 0
 """
 
@@ -30,7 +30,7 @@ from PIL import Image
 from ultralytics import YOLO
 from ultralytics.utils import YAML
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_YAML = REPO_ROOT / "datasets" / "VisDrone.yaml"
 
 IOU_THRS = np.round(np.linspace(0.5, 0.95, 10), 2)

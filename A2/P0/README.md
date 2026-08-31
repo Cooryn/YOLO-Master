@@ -7,24 +7,24 @@
 
 | 文件 | 作用 |
 |---|---|
-| `P0/prepare_visdrone.py` | 下载/复用 VisDrone2019-DET → 校验 split 计数 → 写本地 `datasets/VisDrone.yaml`（绝对路径） |
-| `P0/baseline_train.py` | yolo11n 从零训练 + 每 epoch 正样本统计回调 |
-| `P0/tiered_eval.py` | 统一分档评测：tiny/small/medium/large AP（COCO 面积口径，检测按其命中 GT 的面积分档） |
+| `A2/P0/prepare_visdrone.py` | 下载/复用 VisDrone2019-DET → 校验 split 计数 → 写本地 `datasets/VisDrone.yaml`（绝对路径） |
+| `A2/P0/baseline_train.py` | yolo11n 从零训练 + 每 epoch 正样本统计回调 |
+| `A2/P0/tiered_eval.py` | 统一分档评测：tiny/small/medium/large AP（COCO 面积口径，检测按其命中 GT 的面积分档） |
 | `ultralytics/utils/loss.py` | 唯一核心改动：`v8DetectionLoss` 增加 `fg_count` / `fg_count_by_stride` 计数 |
 
 ## 复现命令
 
 ```bash
 # 1. 数据（幂等：已存在则跳过下载，只校验 + 写本地 yaml）
-python P0/prepare_visdrone.py
+python A2/P0/prepare_visdrone.py
 
 # 2. 链路冒烟（1 epoch，验证 loss 计数 + 回调 + 分档评测）
-python P0/baseline_train.py --epochs 1 --imgsz 320 --batch 8 --device 0 --name visdrone-smoke-1ep
-python P0/tiered_eval.py --weights runs/p0/visdrone-smoke-1ep/weights/last.pt --imgsz 320 --device 0
+python A2/P0/baseline_train.py --epochs 1 --imgsz 320 --batch 8 --device 0 --name visdrone-smoke-1ep
+python A2/P0/tiered_eval.py --weights runs/a2/p0/visdrone-smoke-1ep/weights/last.pt --imgsz 320 --device 0
 
 # 3. 全量基线（100 epoch，imgsz 640）
-python P0/baseline_train.py --epochs 100 --imgsz 640 --batch 16 --device 0
-python P0/tiered_eval.py --weights runs/p0/visdrone-baseline-yolo11n/weights/best.pt --imgsz 640 --device 0
+python A2/P0/baseline_train.py --epochs 100 --imgsz 640 --batch 16 --device 0
+python A2/P0/tiered_eval.py --weights runs/a2/p0/visdrone-baseline-yolo11n/weights/best.pt --imgsz 640 --device 0
 ```
 
 ## 数据与环境

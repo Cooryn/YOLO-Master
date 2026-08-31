@@ -11,8 +11,8 @@ The loss/config injection points are ``v8DetectionLoss`` in ``ultralytics/utils/
 and ``DetectionModel.init_criterion`` in ``ultralytics/nn/tasks.py``.
 
 Examples:
-    python A2/smoke_test.py --device 0
-    python A2/smoke_test.py --device cpu --imgsz 320 --epochs 1
+    python A2/smoke/smoke_test.py --device 0
+    python A2/smoke/smoke_test.py --device cpu --imgsz 320 --epochs 1
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_DIR = REPO_ROOT / "datasets" / "VisDrone-smoke"
 DATASET_YAML = REPO_ROOT / "datasets" / "VisDrone-smoke.yaml"
 
