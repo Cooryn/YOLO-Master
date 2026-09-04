@@ -3,7 +3,7 @@
 
 Reproducible entry point for the "STAL 式小目标自适应标签分配" admission smoke test.
 It (1) generates a tiny VisDrone-format subset (10 classes, small 8-24 px objects),
-(2) trains YOLO11n from scratch for one epoch end-to-end (data -> assigner -> loss -> val),
+(2) trains YOLO-Master v0.1-N from scratch for one epoch end-to-end (data -> assigner -> loss -> val),
 and (3) prints the metric log line (box/cls/dfl loss + per-class mAP) and the run dir.
 
 The assigner exercised here is ``TaskAlignedAssigner`` in ``ultralytics/utils/tal.py``.
@@ -19,14 +19,22 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Ensure this repo's ``ultralytics`` is imported when ``run_smoke`` does its local import (a stale
+# editable install elsewhere would shadow it).
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 DATASET_DIR = REPO_ROOT / "datasets" / "VisDrone-smoke"
 DATASET_YAML = REPO_ROOT / "datasets" / "VisDrone-smoke.yaml"
+# YOLO-Master v0.1-N (MoE) — the reproduction-protocol baseline model (NOT stock yolo11n.yaml).
+MODEL_YAML = REPO_ROOT / "ultralytics" / "cfg" / "models" / "master" / "v0_1" / "det" / "yolo-master-n.yaml"
 
 # VisDrone2019-DET class order (matches ultralytics/cfg/datasets/VisDrone.yaml).
 VISDRONE_NAMES = [
@@ -104,7 +112,7 @@ def run_smoke(model_cfg: str, data_yaml: str, epochs: int, imgsz: int, batch: in
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="STAL small-object label-assignment smoke test")
-    parser.add_argument("--model", default="yolo11n.yaml", help="model config (from-scratch, no .pt)")
+    parser.add_argument("--model", default=str(MODEL_YAML), help="model config (from-scratch, no .pt)")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--imgsz", type=int, default=320)
     parser.add_argument("--batch", type=int, default=4)

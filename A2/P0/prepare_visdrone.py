@@ -16,9 +16,15 @@ Usage:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Ensure this repo's ``ultralytics`` is imported when ``main`` does its local import (a stale
+# editable install elsewhere would shadow it).
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 LOCAL_YAML = REPO_ROOT / "datasets" / "VisDrone.yaml"
 
 # Expected split sizes from the VisDrone2019-DET config (test-dev only; test-challenge is skipped).

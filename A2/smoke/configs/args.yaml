@@ -1,6 +1,6 @@
 task: detect
 mode: train
-model: yolo11n.yaml
+model: ultralytics/cfg/models/master/v0_1/det/yolo-master-n.yaml
 data: D:\CODE\smoke\datasets\VisDrone-smoke.yaml
 epochs: 1
 time: null
@@ -13,7 +13,7 @@ cache: false
 device: '0'
 workers: 0
 project: null
-name: train-3
+name: train-6
 exist_ok: false
 pretrained: false
 cls_remap: true
@@ -146,6 +146,13 @@ kobj: 1.0
 rle: 1.0
 angle: 1.0
 nbs: 64
+tal_topk: 10
+stal_mode: fixed
+stal_min_positive: false
+stal_area_small: 1024
+stal_area_medium: 9216
+stal_topk_small: 13
+stal_expand: 1.0
 hsv_h: 0.015
 hsv_s: 0.7
 hsv_v: 0.4
@@ -329,7 +336,7 @@ moe_map_saturation_window_size: 5
 moe_map_saturation_threshold: 0.001
 moe_map_saturation_decay_factor: 0.8
 moe_map_saturation_min_scale: 0.1
-save_dir: D:\yolo\ultralytics\runs\detect\train-3
+save_dir: D:\yolo\ultralytics\runs\detect\train-6
 effective_optimizer: AdamW
 effective_optimizer_lrs:
 - 0.000714

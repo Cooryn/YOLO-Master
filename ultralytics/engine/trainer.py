@@ -1386,6 +1386,7 @@ class BaseTrainer:
                     "imgsz",
                     "batch",
                     "device",
+                    "amp",
                     "close_mosaic",
                     "augmentations",
                     "save_period",
