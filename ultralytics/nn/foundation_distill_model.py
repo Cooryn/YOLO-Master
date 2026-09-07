@@ -8,6 +8,7 @@ existing distillation path unnecessarily fragile.
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import torch
@@ -25,6 +26,8 @@ from ultralytics.nn.foundation import (
     StudentFeatureTap,
     cosine_kd_loss,
     foreground_token_weights,
+    load_foundation_batch,
+    load_foundation_features,
     relational_kd_loss,
     RegionSemanticProjector,
     positive_region_pool,
@@ -163,6 +166,16 @@ class FoundationDistillationModel(nn.Module):
         if self.semantic_temperature <= 0:
             raise ValueError("foundation_semantic_temperature must be positive.")
         self._semantic_enabled = self.semantic_distill and self.semantic_loss_weight > 0.0
+        self.response_distill = bool(_get(config, "foundation_response_distill", False))
+        self.response_loss_weight = float(_get(config, "foundation_response_loss_weight", 0.0) or 0.0)
+        if self.response_loss_weight < 0:
+            raise ValueError("foundation_response_loss_weight must be non-negative.")
+        default_threshold = 0.5
+        configured_threshold = _get(config, "foundation_response_score_threshold", default_threshold)
+        self.response_score_threshold = float(default_threshold if configured_threshold is None else configured_threshold)
+        if not 0.0 <= self.response_score_threshold <= 1.0:
+            raise ValueError("foundation_response_score_threshold must lie in [0, 1].")
+        self._response_enabled = self.response_distill and self.response_loss_weight > 0.0
         # F15 is deliberately explicit.  Existing Foundation runs, including a
         # MultiTask model used without the F15 flag, retain the historical
         # single Foundation metrics and loss contract.
@@ -173,9 +186,31 @@ class FoundationDistillationModel(nn.Module):
         self.multitask_negative_transfer_threshold = float(4.0 if multitask_threshold is None else multitask_threshold)
         if self.multitask_negative_transfer_threshold <= 0:
             raise ValueError("foundation_multitask_negative_transfer_threshold must be positive.")
+        cache_dir = _get(config, "foundation_cache_dir", None)
+        if cache_dir in (None, "", "none"):
+            self.__dict__["_cache_dir"] = None
+        else:
+            cache_path = Path(str(cache_dir))
+            if not cache_path.is_dir():
+                raise FileNotFoundError(
+                    f"foundation_cache_dir '{cache_path}' does not exist; run the offline extraction CLI first "
+                    "(python -m ultralytics.nn.foundation.offline)."
+                )
+            if self.foundation_teacher_name == "multi":
+                raise ValueError("foundation_cache_dir stores single-teacher features; it does not support F14 multi.")
+            self.__dict__["_cache_dir"] = cache_path
+        if self._response_enabled and self.__dict__["_cache_dir"] is None and teacher_manager is not None:
+            if not callable(getattr(teacher_manager, "detect", None)):
+                raise ValueError(
+                    "foundation_response_distill requires either foundation_cache_dir (with cached responses) "
+                    "or an online teacher exposing detect(images, prompts)."
+                )
         self._disabled = (
-            self.loss_weight <= 0 and not self._router_enabled and not self._semantic_enabled
-        ) or teacher_manager is None
+            self.loss_weight <= 0
+            and not self._router_enabled
+            and not self._semantic_enabled
+            and not self._response_enabled
+        ) or (teacher_manager is None and self.__dict__["_cache_dir"] is None)
         self.__dict__["_student_only"] = False
         # Bypass nn.Module.__setattr__: teacher state must never be part of parameters/state_dict/DDP/EMA.
         self.__dict__["_teacher_manager"] = None if self._disabled else teacher_manager
@@ -233,6 +268,87 @@ class FoundationDistillationModel(nn.Module):
     def teacher_manager(self):
         """Return the unregistered, frozen teacher backend (or ``None`` on the disabled path)."""
         return self.__dict__.get("_teacher_manager")
+
+    @property
+    def cache_dir(self) -> Path | None:
+        """Return the offline Foundation feature cache directory, if configured."""
+        return self.__dict__.get("_cache_dir")
+
+    def _cache_probe_features(self, device: Any = None) -> FoundationFeatures:
+        """Load one cached sample to discover teacher channel/semantic dimensions without an online teacher."""
+        cache_dir = self.cache_dir
+        sample = next(
+            (path for path in sorted(cache_dir.rglob("*.pt")) if path.name != "text_prototypes.pt"), None
+        )
+        if sample is None:
+            raise FileNotFoundError(f"foundation_cache_dir '{cache_dir}' contains no cached samples.")
+        features, _ = load_foundation_features(sample, device=device)
+        return features
+
+    @staticmethod
+    def _cache_keys(batch: Mapping[str, Any]) -> list[str] | None:
+        """Derive per-sample cache keys (image file stems) from the batch, or None when unavailable."""
+        im_files = batch.get("im_file")
+        if not isinstance(im_files, (list, tuple)) or len(im_files) != int(batch["img"].shape[0]):
+            return None
+        keys = [Path(str(item)).stem for item in im_files]
+        return keys if all(keys) else None
+
+    def _teacher_batch_output(self, batch: Mapping[str, Any]) -> tuple[Any, Any | None]:
+        """Resolve teacher features for a batch: offline cache first, online ``encode`` as fallback.
+
+        Returns ``(features, response)``.  ``response`` is ``None`` unless ``_response_enabled`` is True and the
+        cache/teacher produced one.
+        """
+        cache_dir = self.cache_dir
+        teacher = self.teacher_manager
+        if cache_dir is not None:
+            keys = self._cache_keys(batch)
+            if keys is not None:
+                try:
+                    return load_foundation_batch(
+                        cache_dir, keys, device=batch["img"].device, with_response=self._response_enabled
+                    )
+                except FileNotFoundError:
+                    if teacher is None:
+                        raise
+            elif teacher is None:
+                raise ValueError(
+                    "foundation_cache_dir is set without an online teacher, but the batch carries no 'im_file' keys."
+                )
+        if teacher is None:
+            raise RuntimeError("Foundation teacher is unavailable for online encode().")
+        if self._response_enabled:
+            encode_with_response = getattr(teacher, "encode_with_response", None)
+            if callable(encode_with_response):
+                prompts = self._response_prompt_list(batch)
+                return encode_with_response(batch["img"], prompts)
+            detect = getattr(teacher, "detect", None)
+            encode = getattr(teacher, "encode", None)
+            if callable(detect) and callable(encode):
+                prompts = self._response_prompt_list(batch)
+                return encode(batch["img"]), detect(batch["img"], prompts)
+            raise ValueError(
+                "foundation_response_distill requires a teacher exposing encode_with_response() or both "
+                "encode() and detect()."
+            )
+        return teacher.encode(batch["img"]), None
+
+    def _response_prompt_list(self, batch: Mapping[str, Any]) -> tuple[str, ...]:
+        """Resolve the ordered prompt list for the response channel (cached or student class names)."""
+        configured = _get(self.config, "foundation_semantic_prompts", None)
+        if configured:
+            return tuple(str(item) for item in configured)
+        names = getattr(self.student_model, "names", {}) or {}
+        if isinstance(names, Mapping):
+            names = [names[key] for key in sorted(names)]
+        prompts = tuple(str(name) for name in names) if isinstance(names, (list, tuple)) else ()
+        if not prompts:
+            raise ValueError(
+                "foundation_response_distill needs class names or foundation_semantic_prompts to map teacher "
+                "responses to student class ids."
+            )
+        return prompts
 
     @property
     def student(self):
@@ -623,7 +739,10 @@ class FoundationDistillationModel(nn.Module):
             self.student_model(torch.zeros(2, ch, size, size, device=device))
             student_feature = tap.feature
             if teacher_feature is None:
-                teacher_features = teacher.encode(torch.zeros(2, 3, size, size, device=device))
+                if teacher is not None:
+                    teacher_features = teacher.encode(torch.zeros(2, 3, size, size, device=device))
+                else:
+                    teacher_features = self._cache_probe_features(device=device)
                 teacher_feature = _dense_p4(teacher_features)
         self.student_model.train(was_training)
         if student_feature.shape[1] <= 0 or teacher_feature.shape[1] <= 0:
@@ -647,7 +766,10 @@ class FoundationDistillationModel(nn.Module):
             tap.clear()
         with torch.inference_mode():
             self.student_model(torch.zeros(2, ch, size, size, device=device))
-            teacher_features = self.teacher_manager.encode(torch.zeros(2, 3, size, size, device=device))
+            if self.teacher_manager is not None:
+                teacher_features = self.teacher_manager.encode(torch.zeros(2, 3, size, size, device=device))
+            else:
+                teacher_features = self._cache_probe_features(device=device)
             teacher_feature = _dense_p4(teacher_features)
         self.student_model.train(was_training)
         projectors = nn.ModuleDict()
@@ -665,7 +787,9 @@ class FoundationDistillationModel(nn.Module):
     def _build_semantic_components(self) -> None:
         """Discover P4/teacher semantic dimensions and construct the F13 adapter."""
         teacher = self.teacher_manager
-        if not callable(getattr(teacher, "encode", None)):
+        if teacher is None and self.cache_dir is None:
+            raise ValueError("F13 semantic distillation requires a teacher exposing encode() or a foundation cache.")
+        if teacher is not None and not callable(getattr(teacher, "encode", None)):
             raise ValueError("F13 semantic distillation requires a teacher exposing encode().")
         if "p4" in self.taps:
             tap = self.taps["p4"]
@@ -683,7 +807,10 @@ class FoundationDistillationModel(nn.Module):
         with torch.inference_mode():
             self.student_model(torch.zeros(2, ch, size, size, device=device))
             student_feature = tap.feature
-            teacher_features = teacher.encode(torch.zeros(2, 3, size, size, device=device))
+            if teacher is not None:
+                teacher_features = teacher.encode(torch.zeros(2, 3, size, size, device=device))
+            else:
+                teacher_features = self._cache_probe_features(device=device)
         self.student_model.train(was_training)
         semantic = getattr(teacher_features, "semantic", None)
         if semantic is None and isinstance(teacher_features, Mapping):
@@ -716,13 +843,29 @@ class FoundationDistillationModel(nn.Module):
         """Encode and cache text prototypes outside the student state_dict."""
         teacher = self.teacher_manager
         encode_text = getattr(teacher, "encode_text", None)
-        if not callable(encode_text):
+        if not callable(encode_text) and self.cache_dir is None:
             raise ValueError("F13 semantic distillation requires a SigLIP2-like teacher exposing encode_text().")
         prompts = tuple(self._semantic_prompt_list())
         cached = self.__dict__.get("_semantic_text_cache")
         if cached is not None and self.__dict__.get("_semantic_prompts") == prompts:
             return cached.to(device=next(self.student_model.parameters()).device)
-        prototypes = encode_text(prompts)
+        if callable(encode_text):
+            prototypes = encode_text(prompts)
+        else:
+            prototype_path = self.cache_dir / "text_prototypes.pt"
+            if not prototype_path.is_file():
+                raise FileNotFoundError(
+                    f"foundation_cache_dir '{self.cache_dir}' has no text_prototypes.pt; "
+                    "re-run offline extraction with --prompts."
+                )
+            payload = torch.load(prototype_path, map_location="cpu", weights_only=False)
+            cached_prompts = tuple(payload.get("prompts") or ())
+            if cached_prompts != prompts:
+                raise ValueError(
+                    f"cached text prototypes were extracted for prompts {cached_prompts} but training expects "
+                    f"{prompts}; align foundation_semantic_prompts with the extraction --prompts."
+                )
+            prototypes = payload["prototypes"].float()
         if not isinstance(prototypes, torch.Tensor) or prototypes.ndim != 2:
             raise ValueError("Foundation text prototypes must have shape (num_classes, semantic_dim).")
         self.__dict__["_semantic_prompts"] = prompts
@@ -810,6 +953,77 @@ class FoundationDistillationModel(nn.Module):
             "foundation_semantic_text_loss": float((text_loss * self.semantic_loss_weight).detach()),
             "foundation_semantic_image_loss": float((image_loss * self.semantic_loss_weight).detach()),
             "foundation_semantic_regions": float(regions.shape[0]),
+        }
+
+    def _response_kd(self, batch: dict, preds: Any, response: Any) -> tuple[torch.Tensor, dict[str, float]]:
+        """Detection-level pseudo-label KD from the cached/online teacher response channel.
+
+        Teacher boxes with ``scores > response_score_threshold`` become pseudo-GT; the student task loss is
+        re-evaluated against those targets using the already-computed ``preds`` so gradients flow through the
+        student detection head without a second forward pass.
+        """
+        zero = next(self.student_model.parameters()).sum() * 0.0
+        empty_metrics = {"foundation_response_loss": 0.0, "foundation_response_boxes": 0.0}
+        if response is None:
+            raise ValueError(
+                "foundation_response_distill is enabled but the teacher/cache did not produce a response; "
+                "re-run offline extraction with --prompts."
+            )
+        if not isinstance(response, Mapping):
+            return zero, empty_metrics
+        boxes = response.get("boxes")
+        scores = response.get("scores")
+        prompts = response.get("prompts")
+        if not isinstance(boxes, torch.Tensor) or not isinstance(scores, torch.Tensor):
+            return zero, empty_metrics
+        if not prompts:
+            raise ValueError(
+                "foundation_response_distill needs response['prompts']; re-run offline extraction with --prompts."
+            )
+        flat_prompts: list[str] = []
+        for item in prompts:
+            flat_prompts.extend(str(item).split())
+        prompts = flat_prompts
+        names = getattr(self.student_model, "names", {}) or {}
+        if isinstance(names, Mapping):
+            ordered_names = [names[key] for key in sorted(names)]
+        elif isinstance(names, (list, tuple)):
+            ordered_names = list(names)
+        else:
+            ordered_names = []
+        class_ids = []
+        for prompt in prompts:
+            prompt_str = str(prompt)
+            if prompt_str in ordered_names:
+                class_ids.append(ordered_names.index(prompt_str))
+            else:
+                raise ValueError(
+                    f"foundation_response_distill prompt '{prompt_str}' is not in student.names "
+                    f"{ordered_names}; align extraction --prompts with the student class vocabulary."
+                )
+        # Clone out of inference_mode and promote to float/autograd-safe tensors.
+        boxes_detached = boxes.clone().float()
+        scores_detached = scores.clone().float()
+        threshold = self.response_score_threshold
+        mask = scores_detached > threshold
+        if not bool(mask.any()):
+            return zero, {"foundation_response_loss": 0.0, "foundation_response_boxes": 0.0}
+        prompt_idx, batch_idx, query_idx = mask.nonzero(as_tuple=True)
+        selected_boxes = boxes_detached[prompt_idx, batch_idx, query_idx]
+        selected_classes = torch.tensor(
+            [class_ids[int(p)] for p in prompt_idx.tolist()], device=selected_boxes.device, dtype=torch.float32
+        )
+        pseudo_batch = {
+            "img": batch["img"],
+            "bboxes": selected_boxes,
+            "cls": selected_classes.reshape(-1, 1),
+            "batch_idx": batch_idx.to(device=selected_boxes.device, dtype=torch.float32),
+        }
+        loss_p, _ = self.student_model.loss(pseudo_batch, preds)
+        response_loss = loss_p.sum() * self.response_loss_weight
+        return response_loss, {
+            "foundation_response_loss": float(response_loss.detach()),
+            "foundation_response_boxes": float(selected_boxes.shape[0]),
         }
 
     def _kd_loss(self, student_feature: torch.Tensor, teacher_feature: torch.Tensor) -> torch.Tensor:
@@ -957,7 +1171,7 @@ class FoundationDistillationModel(nn.Module):
             self.student_model(batch["img"])
         student_features = {level: tap.feature for level, tap in taps.items()}
         with torch.inference_mode():
-            teacher_output = self.teacher_manager.encode(batch["img"])
+            teacher_output, teacher_response = self._teacher_batch_output(batch)
             teacher_feature = _dense_p4(teacher_output)
             if self.foundation_teacher_name == "multi":
                 teacher_summary = foundation_multiteacher_summary(teacher_output)
@@ -1012,7 +1226,10 @@ class FoundationDistillationModel(nn.Module):
         semantic_loss, semantic_metrics = (
             self._semantic_kd(batch, preds, teacher_output) if self._semantic_enabled else (kd * 0.0, {})
         )
-        foundation_loss = feature_loss + route_loss + semantic_loss
+        response_loss, response_metrics = (
+            self._response_kd(batch, preds, teacher_response) if self._response_enabled else (kd * 0.0, {})
+        )
+        foundation_loss = feature_loss + route_loss + semantic_loss + response_loss
         self.__dict__["_last_foundation_loss"] = foundation_loss.detach()
         task_scalar = float(task_loss.detach().float().mean().item())
         foundation_scalar = float(foundation_loss.detach().float().item())
@@ -1034,11 +1251,14 @@ class FoundationDistillationModel(nn.Module):
         }
         self.__dict__["_last_foundation_metrics"].update(route_metrics)
         self.__dict__["_last_foundation_metrics"].update(semantic_metrics)
+        self.__dict__["_last_foundation_metrics"].update(response_metrics)
         self.__dict__["_last_foundation_metrics"].update(
             self._multitask_metrics(task_loss, task_items, foundation_loss, preds)
         )
         if self.semantic_distill:
             self.__dict__["_last_foundation_metrics"]["foundation_semantic_enabled"] = float(self._semantic_enabled)
+        if self.response_distill:
+            self.__dict__["_last_foundation_metrics"]["foundation_response_enabled"] = float(self._response_enabled)
         if self.multiscale:
             for level, values in components:
                 self.__dict__["_last_foundation_metrics"][f"foundation_{level}_loss"] = float(
@@ -1207,6 +1427,13 @@ class FoundationDistillationModel(nn.Module):
             if self._semantic_enabled
             else [],
             "semantic_dim": int(getattr(self.semantic_projector, "semantic_dim", 0) or 0),
+            "response_distill": bool(_get(self.config, "foundation_response_distill", self.response_distill)),
+            "response_loss_weight": float(
+                _get(self.config, "foundation_response_loss_weight", self.response_loss_weight) or 0.0
+            ),
+            "response_score_threshold": float(
+                _get(self.config, "foundation_response_score_threshold", self.response_score_threshold)
+            ),
             "router_distill": bool(_get(self.config, "foundation_router_distill", self.router_distill)),
             "router_loss_weight": float(
                 _get(self.config, "foundation_router_loss_weight", self.router_loss_weight) or 0.0
@@ -1447,7 +1674,11 @@ def build_foundation_distillation_wrapper(
         bool(_get(args, "foundation_semantic_distill", False))
         and float(_get(args, "foundation_semantic_loss_weight", 0.0) or 0.0) > 0
     )
-    if not enabled or (weight <= 0 and not router_enabled and not semantic_enabled):
+    response_enabled = (
+        bool(_get(args, "foundation_response_distill", False))
+        and float(_get(args, "foundation_response_loss_weight", 0.0) or 0.0) > 0
+    )
+    if not enabled or (weight <= 0 and not router_enabled and not semantic_enabled and not response_enabled):
         return student_model
     if teacher_manager is None:
         backend = str(_get(args, "foundation_backend", "transformers")).lower()
@@ -1456,6 +1687,9 @@ def build_foundation_distillation_wrapper(
                 f"F06 does not construct foundation_backend={backend!r}; inject a teacher_manager instead."
             )
         teacher_name = str(_get(args, "foundation_teacher", "dinov3")).lower()
+        if teacher_name in {"none", ""} and _get(args, "foundation_cache_dir", None) not in (None, "", "none"):
+            # Cache-only mode: teacher features (and optional response channel) come from the offline cache directory.
+            return FoundationDistillationModel(student_model=student_model, teacher_manager=None, config=args)
         dtype = _get(args, "foundation_teacher_dtype", "auto")
         teacher_device = _teacher_device(_get(args, "foundation_teacher_device", "auto"), device)
         if teacher_name == "multi":
