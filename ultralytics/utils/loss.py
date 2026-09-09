@@ -371,8 +371,8 @@ class v8DetectionLoss:
         self.assigner = TaskAlignedAssigner(
             topk=tal_topk,
             num_classes=self.nc,
-            alpha=0.5,
-            beta=6.0,
+            alpha=getattr(h, "tal_alpha", 0.5),
+            beta=getattr(h, "tal_beta", 6.0),
             stride=self.stride.tolist(),
             topk2=tal_topk2,
             stal_mode=getattr(h, "stal_mode", "fixed"),

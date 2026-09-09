@@ -105,7 +105,13 @@ def main() -> None:
         help="force >=1 positive anchor per recoverable GT (adaptive mode)",
     )
     parser.add_argument("--stal-topk-small", type=int, default=None, help="adaptive top-k for small GTs")
-    parser.add_argument("--stal-expand", type=float, default=None, help="candidate-region expansion radius (stride[0] units)")
+    parser.add_argument(
+        "--stal-expand", type=float, default=None, help="candidate-region expansion radius (stride[0] units)"
+    )
+    parser.add_argument(
+        "--tal-alpha", type=float, default=None, help="TAL metric classification exponent (score^alpha)"
+    )
+    parser.add_argument("--tal-beta", type=float, default=None, help="TAL metric localization exponent (iou^beta)")
     args = parser.parse_args()
 
     # Pause/resume: when --resume is set, reload the run's last.pt and continue from the saved epoch.
@@ -144,6 +150,8 @@ def main() -> None:
         ("stal_min_positive", args.stal_min_positive),
         ("stal_topk_small", args.stal_topk_small),
         ("stal_expand", args.stal_expand),
+        ("tal_alpha", args.tal_alpha),
+        ("tal_beta", args.tal_beta),
     ):
         if val is not None:
             train_kwargs[key] = val

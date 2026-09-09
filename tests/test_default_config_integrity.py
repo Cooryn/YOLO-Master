@@ -72,6 +72,10 @@ def test_stal_defaults_parse_with_expected_types():
     assert cfg.stal_area_medium == 96**2
     assert isinstance(cfg.stal_topk_small, int)
     assert isinstance(cfg.stal_expand, float)
+    assert isinstance(cfg.tal_alpha, float)
+    assert cfg.tal_alpha == 0.5
+    assert isinstance(cfg.tal_beta, float)
+    assert cfg.tal_beta == 6.0
 
 
 def test_stal_mode_is_enum_checked():
@@ -107,6 +111,22 @@ def test_stal_keys_are_type_checked():
         assert "stal_topk_small" in str(exc)
     else:
         raise AssertionError("stal_topk_small must reject string values")
+
+
+def test_tal_alpha_beta_type_and_value_checked():
+    check_cfg({"tal_alpha": 0.25, "tal_beta": 4.0})
+    try:
+        check_cfg({"tal_beta": "6.0"})
+    except TypeError as exc:
+        assert "tal_beta" in str(exc)
+    else:
+        raise AssertionError("tal_beta string must reject string values")
+    try:
+        get_cfg(overrides={"tal_alpha": 0.0})
+    except ValueError as exc:
+        assert "tal_alpha" in str(exc)
+    else:
+        raise AssertionError("tal_alpha=0 must be rejected")
 
 
 def test_molora_none_and_empty_optional_values_have_stable_semantics():

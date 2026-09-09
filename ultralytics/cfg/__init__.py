@@ -290,6 +290,8 @@ CFG_FLOAT_KEYS = frozenset(
         "workspace",
         "batch",
         "stal_expand",
+        "tal_alpha",
+        "tal_beta",
     }
 ) | MIXTURE_FLOAT_KEYS
 CFG_FRACTION_KEYS = frozenset(
@@ -1003,6 +1005,13 @@ def validate_stal_config(cfg: dict) -> None:
     topk_small = cfg.get("stal_topk_small", DEFAULT_CFG_DICT["stal_topk_small"])
     if topk_small <= 0:
         raise ValueError("'stal_topk_small' must be a positive integer.")
+
+    alpha = cfg.get("tal_alpha", DEFAULT_CFG_DICT["tal_alpha"])
+    beta = cfg.get("tal_beta", DEFAULT_CFG_DICT["tal_beta"])
+    if not isinstance(alpha, (int, float)) or alpha <= 0:
+        raise ValueError("'tal_alpha' must be a positive number.")
+    if not isinstance(beta, (int, float)) or beta <= 0:
+        raise ValueError("'tal_beta' must be a positive number.")
 
 
 def get_save_dir(args: SimpleNamespace, name: str | None = None) -> Path:
