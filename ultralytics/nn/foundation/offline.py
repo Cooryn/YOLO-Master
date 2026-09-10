@@ -90,6 +90,29 @@ def load_foundation_features(
     return features, response
 
 
+def _load_response_only(
+    path: str | Path,
+    device: Any,
+    dtype: torch.dtype | None,
+) -> tuple[FoundationFeatures, dict[str, Any] | None]:
+    """Load only the response payload from a cache file, skipping dense/pooled/semantic features."""
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Foundation cache '{path}' is not a mapping.")
+    response = payload.get("response")
+    if response is not None:
+        response = {
+            name: _restore(value, device, dtype) if isinstance(value, torch.Tensor) else value
+            for name, value in response.items()
+        }
+    return _empty_foundation(), response
+
+
+def _empty_foundation() -> FoundationFeatures:
+    """Return a FoundationFeatures with empty dense dict and None pooled/semantic."""
+    return FoundationFeatures(dense={}, pooled=None, semantic=None, metadata={})
+
+
 def load_foundation_batch(
     cache_dir: str | Path,
     keys: Sequence[str],
@@ -97,12 +120,17 @@ def load_foundation_batch(
     device: Any = None,
     dtype: torch.dtype | None = torch.float32,
     with_response: bool = False,
+    response_only: bool = False,
 ) -> tuple[FoundationFeatures, dict[str, Any] | None]:
     """Load ``cache_dir/<key>.pt`` samples and concatenate them into one batched :class:`FoundationFeatures`.
 
     Returns ``(features, response)``.  ``response`` is ``None`` when any entry lacks a cached detection response or
     when ``with_response`` is ``False``; with ``with_response=True`` per-sample responses are concatenated along
     the batch dimension and validated for prompt consistency.
+
+    When ``response_only=True``, dense/pooled/semantic features are skipped (stored as empty/None) and only the
+    response payload is loaded.  This avoids loading large feature tensors from disk when only the detection
+    response channel is needed (e.g. response-only distillation).
     """
     if not keys:
         raise ValueError("keys must be a non-empty sequence of cache keys.")
@@ -113,9 +141,14 @@ def load_foundation_batch(
         path = cache_dir / f"{key}.pt"
         if not path.is_file():
             raise FileNotFoundError(f"Foundation cache entry '{path}' is missing; re-run offline extraction.")
-        features, response = load_foundation_features(path, device=device, dtype=dtype)
+        if response_only:
+            features, response = _load_response_only(path, device, dtype)
+        else:
+            features, response = load_foundation_features(path, device=device, dtype=dtype)
         samples.append(features)
         responses.append(response)
+    if response_only:
+        return _empty_foundation(), _merge_responses(keys, responses) if with_response else None
     first = samples[0]
     level_names = tuple(first.dense)
     for key, sample in zip(keys[1:], samples[1:]):
