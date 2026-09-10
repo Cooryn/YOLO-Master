@@ -40,6 +40,8 @@ from ultralytics.nn.foundation.routing import (
     foundation_teacher_summary,
     routing_kd_loss,
 )
+from ultralytics.utils.metrics import bbox_iou
+from ultralytics.utils.tal import dist2bbox, make_anchors
 
 
 def _get(config: Any, name: str, default: Any = None) -> Any:
@@ -176,6 +178,7 @@ class FoundationDistillationModel(nn.Module):
         if not 0.0 <= self.response_score_threshold <= 1.0:
             raise ValueError("foundation_response_score_threshold must lie in [0, 1].")
         self._response_enabled = self.response_distill and self.response_loss_weight > 0.0
+        self._dense_needed = self.loss_weight > 1e-5
         # F15 is deliberately explicit.  Existing Foundation runs, including a
         # MultiTask model used without the F15 flag, retain the historical
         # single Foundation metrics and loss contract.
@@ -307,7 +310,8 @@ class FoundationDistillationModel(nn.Module):
             if keys is not None:
                 try:
                     return load_foundation_batch(
-                        cache_dir, keys, device=batch["img"].device, with_response=self._response_enabled
+                        cache_dir, keys, device=batch["img"].device, with_response=self._response_enabled,
+                        response_only=not self._dense_needed,
                     )
                 except FileNotFoundError:
                     if teacher is None:
@@ -958,9 +962,9 @@ class FoundationDistillationModel(nn.Module):
     def _response_kd(self, batch: dict, preds: Any, response: Any) -> tuple[torch.Tensor, dict[str, float]]:
         """Detection-level pseudo-label KD from the cached/online teacher response channel.
 
-        Teacher boxes with ``scores > response_score_threshold`` become pseudo-GT; the student task loss is
-        re-evaluated against those targets using the already-computed ``preds`` so gradients flow through the
-        student detection head without a second forward pass.
+        Teacher boxes with scores above the threshold are matched to student predictions by IoU;
+        the loss combines CIoU regression and BCE classification distillation.  This bypasses the
+        TAL assigner to avoid MPS-specific issues in the full task-loss path.
         """
         zero = next(self.student_model.parameters()).sum() * 0.0
         empty_metrics = {"foundation_response_loss": 0.0, "foundation_response_boxes": 0.0}
@@ -1001,29 +1005,86 @@ class FoundationDistillationModel(nn.Module):
                     f"foundation_response_distill prompt '{prompt_str}' is not in student.names "
                     f"{ordered_names}; align extraction --prompts with the student class vocabulary."
                 )
-        # Clone out of inference_mode and promote to float/autograd-safe tensors.
-        boxes_detached = boxes.clone().float()
-        scores_detached = scores.clone().float()
+        boxes_f = boxes.clone().float()
+        scores_f = scores.clone().float()
         threshold = self.response_score_threshold
-        mask = scores_detached > threshold
+        mask = scores_f > threshold
         if not bool(mask.any()):
             return zero, {"foundation_response_loss": 0.0, "foundation_response_boxes": 0.0}
-        prompt_idx, batch_idx, query_idx = mask.nonzero(as_tuple=True)
-        selected_boxes = boxes_detached[prompt_idx, batch_idx, query_idx]
+        prompt_idx, batch_idx_t, query_idx = mask.nonzero(as_tuple=True)
+        selected_boxes = boxes_f[prompt_idx, batch_idx_t, query_idx]
         selected_classes = torch.tensor(
-            [class_ids[int(p)] for p in prompt_idx.tolist()], device=selected_boxes.device, dtype=torch.float32
+            [class_ids[int(p)] for p in prompt_idx.tolist()], device=selected_boxes.device, dtype=torch.long
         )
-        pseudo_batch = {
-            "img": batch["img"],
-            "bboxes": selected_boxes,
-            "cls": selected_classes.reshape(-1, 1),
-            "batch_idx": batch_idx.to(device=selected_boxes.device, dtype=torch.float32),
-        }
-        loss_p, _ = self.student_model.loss(pseudo_batch, preds)
-        response_loss = loss_p.sum() * self.response_loss_weight
+        selected_scores = scores_f[prompt_idx, batch_idx_t, query_idx]
+
+        if isinstance(preds, Mapping) and "one2many" in preds:
+            preds = preds["one2many"]
+        pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
+        pred_scores_raw = preds["scores"].permute(0, 2, 1).contiguous()
+        pred_feats = preds["feats"]
+        anchor_points, stride_tensor = make_anchors(pred_feats, self.student_model.stride, 0.5)
+        bs = pred_scores_raw.shape[0]
+        nc = pred_scores_raw.shape[2]
+        dtype = pred_scores_raw.dtype
+        device = pred_scores_raw.device
+        imgsz = torch.tensor(pred_feats[0].shape[2:], device=device, dtype=dtype) * self.student_model.stride[0]
+        imgsz_wh = imgsz[[1, 0]]
+
+        detect = self.student_model.model[-1]
+        reg_max = detect.reg_max
+        proj = torch.arange(reg_max, dtype=dtype, device=device)
+        b, a, c = pred_distri.shape
+        pred_dist = pred_distri.view(b, a, 4, c // 4).softmax(3).matmul(proj)
+        pred_bboxes_norm = dist2bbox(pred_dist, anchor_points, xywh=False)
+        pred_bboxes = pred_bboxes_norm * stride_tensor
+        bce = F.binary_cross_entropy_with_logits
+        total_iou_loss = zero
+        total_cls_loss = zero
+        total_count = 0
+
+        t_centers = selected_boxes[:, :2].clone()
+        t_centers[:, 0] *= imgsz_wh[0]
+        t_centers[:, 1] *= imgsz_wh[1]
+        t_centers[:, 0] += batch_idx_t.to(dtype) * imgsz_wh[0]
+        t_centers[:, 1] += batch_idx_t.to(dtype) * imgsz_wh[1]
+
+        for i in range(bs):
+            anchor_i = anchor_points + imgsz_wh.to(dtype) * i
+            mask_i = batch_idx_t == i
+            if not bool(mask_i.any()):
+                continue
+            dist_sq = ((t_centers[mask_i].unsqueeze(1) - anchor_i.unsqueeze(0)) ** 2).sum(dim=-1)
+            best_idx_i = dist_sq.argmin(dim=1)
+
+            t_boxes_cxcywh_i = selected_boxes[mask_i] * imgsz_wh.repeat(2)
+            t_x1 = t_boxes_cxcywh_i[:, 0] - t_boxes_cxcywh_i[:, 2] / 2
+            t_y1 = t_boxes_cxcywh_i[:, 1] - t_boxes_cxcywh_i[:, 3] / 2
+            t_x2 = t_boxes_cxcywh_i[:, 0] + t_boxes_cxcywh_i[:, 2] / 2
+            t_y2 = t_boxes_cxcywh_i[:, 1] + t_boxes_cxcywh_i[:, 3] / 2
+            t_boxes_xyxy_i = torch.stack([t_x1, t_y1, t_x2, t_y2], dim=-1)
+
+            matched_pred_i = pred_bboxes[i][best_idx_i]
+            ciou_i = bbox_iou(matched_pred_i, t_boxes_xyxy_i.detach(), xywh=False, CIoU=True).squeeze(-1)
+            total_iou_loss = total_iou_loss + (1.0 - ciou_i).sum()
+
+            t_cls_i = selected_classes[mask_i]
+            t_scores_i = selected_scores[mask_i]
+            target_scores_i = torch.zeros(
+                t_boxes_xyxy_i.shape[0], nc, device=pred_scores_raw.device, dtype=pred_scores_raw.dtype
+            )
+            target_scores_i.scatter_(1, t_cls_i.unsqueeze(1), t_scores_i.unsqueeze(1).float())
+            total_cls_loss = total_cls_loss + bce(pred_scores_raw[i][best_idx_i], target_scores_i)
+
+            total_count += t_boxes_xyxy_i.shape[0]
+
+        if total_count > 0:
+            response_loss = (total_iou_loss + total_cls_loss) / max(total_count, 1) * self.response_loss_weight
+        else:
+            response_loss = zero
         return response_loss, {
             "foundation_response_loss": float(response_loss.detach()),
-            "foundation_response_boxes": float(selected_boxes.shape[0]),
+            "foundation_response_boxes": float(total_count),
         }
 
     def _kd_loss(self, student_feature: torch.Tensor, teacher_feature: torch.Tensor) -> torch.Tensor:
@@ -1172,15 +1233,23 @@ class FoundationDistillationModel(nn.Module):
         student_features = {level: tap.feature for level, tap in taps.items()}
         with torch.inference_mode():
             teacher_output, teacher_response = self._teacher_batch_output(batch)
-            teacher_feature = _dense_p4(teacher_output)
-            if self.foundation_teacher_name == "multi":
-                teacher_summary = foundation_multiteacher_summary(teacher_output)
+            if self._dense_needed:
+                teacher_feature = _dense_p4(teacher_output)
+                if self.foundation_teacher_name == "multi":
+                    teacher_summary = foundation_multiteacher_summary(teacher_output)
+                else:
+                    teacher_summary = foundation_teacher_summary(teacher_output)
             else:
-                teacher_summary = foundation_teacher_summary(teacher_output)
+                student_feature0 = next(iter(student_features.values()))
+                teacher_feature = torch.zeros(
+                    student_feature0.shape[0], 1, 1, 1,
+                    device=student_feature0.device, dtype=student_feature0.dtype,
+                )
+                teacher_summary = teacher_feature.reshape(student_feature0.shape[0], -1)
         foreground_enabled = bool(_get(self.config, "foundation_foreground_weighting", False))
         components = []
         foreground_means = []
-        if self.loss_weight > 0:
+        if self._dense_needed:
             for level, student_feature in student_features.items():
                 projector = self.projector_for(level)
                 student_aligned, teacher_aligned = projector(student_feature, teacher_feature)
