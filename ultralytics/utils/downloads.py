@@ -91,8 +91,11 @@ def delete_dsstore(path: str | Path, files_to_delete: tuple[str, ...] = (".DS_St
     for file in files_to_delete:
         matches = list(Path(path).rglob(file))
         LOGGER.info(f"Deleting {file} files: {matches}")
-        for f in matches:
-            f.unlink()
+        for f in sorted(matches, key=lambda entry: len(entry.parts), reverse=True):
+            if f.is_dir() and not f.is_symlink():
+                shutil.rmtree(f)
+            else:
+                f.unlink()
 
 
 def zip_directory(
@@ -120,13 +123,12 @@ def zip_directory(
     """
     from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
-    delete_dsstore(directory)
     directory = Path(directory)
     if not directory.is_dir():
         raise FileNotFoundError(f"Directory '{directory}' does not exist.")
 
     # Zip with progress bar
-    files = [f for f in directory.rglob("*") if f.is_file() and all(x not in f.name for x in exclude)]  # files to zip
+    files = [f for f in directory.rglob("*") if f.is_file() and not any(part in exclude for part in f.relative_to(directory).parts)]  # files to zip
     zip_file = directory.with_suffix(".zip")
     compression = ZIP_DEFLATED if compress else ZIP_STORED
     with ZipFile(zip_file, "w", compression) as f:
