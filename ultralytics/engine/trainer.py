@@ -822,7 +822,8 @@ class BaseTrainer:
             if validated:
                 self._clear_memory(None if self.device.type == "mps" else 0.5)  # prevent VRAM spike
                 if self._recover_before_validation(epoch):
-                    self._finalize_moe_map_saturation_epoch(recovered=True, validated=True)
+                    last_opt_step = _reset_optimizer_accumulation_after_recovery(self.optimizer)
+                    self._finalize_moe_map_saturation_epoch(recovered=True, validated=False)
                     continue
                 self.metrics, self.fitness = self.validate()
 
@@ -1220,7 +1221,7 @@ class BaseTrainer:
         }
 
     def _recover_before_validation(self, epoch):
-        """Recover before validation if the online or EMA model is already non-finite."""
+        """Return whether to replay the epoch after prevalidation recovery; EMA-only resync needs no replay."""
         flags = self._collect_prevalidation_nonfinite_flags()
         if flags["ema_nonfinite"]:
             self._recovery_controller().resync_nonfinite_ema()
@@ -1230,9 +1231,9 @@ class BaseTrainer:
         self.fitness = float("nan")
         recovered = self._handle_nan_recovery(epoch)
         if recovered:
-            # The live graph is finite again. Validate and checkpoint the restored state
-            # instead of replaying an epoch that may repeat a deterministic callback fault.
-            return False
+            # Rolling back the online model discards this attempt's updates. Replay it without
+            # committing stale metrics or clearing the consecutive recovery budget.
+            return True
         return any(self._collect_prevalidation_nonfinite_flags().values())
 
     def _record_nonfinite_diagnostic(self, component, *, epoch, step, loss_items=None, parameter=None):

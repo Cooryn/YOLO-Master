@@ -324,11 +324,14 @@ def test_checkpoint_nonfinite_ema_resync():
 
 
 def test_checkpoint_nonfinite_ema_and_model_sanitized():
-    """Test a tensor non-finite in both EMA and model is sanitized (not skipped) so the run still produces a checkpoint."""
+    """A one-time online/EMA fault is restored and replayed before saving a completed epoch."""
+    injected = False
 
     def poison_ema_and_model(trainer):
         """Force the first parameter non-finite in both the live EMA and the model (finite-loss sticky-NaN)."""
-        if trainer.ema is not None:
+        nonlocal injected
+        if trainer.ema is not None and not injected:
+            injected = True
             next(iter(trainer.ema.ema.parameters())).data.flatten()[0] = float("inf")
             next(iter(unwrap_model(trainer.model).parameters())).data.flatten()[0] = float("nan")
 
