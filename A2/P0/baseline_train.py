@@ -112,6 +112,19 @@ def main() -> None:
         "--tal-alpha", type=float, default=None, help="TAL metric classification exponent (score^alpha)"
     )
     parser.add_argument("--tal-beta", type=float, default=None, help="TAL metric localization exponent (iou^beta)")
+    parser.add_argument(
+        "--optimizer",
+        default=None,
+        help="optimizer override (e.g. MuSGD/AdamW). default=auto picks MuSGD only when iterations>10000 "
+        "(~98 epochs at batch=6/nbs=64), so 30-epoch screening silently falls back to AdamW unless forced here.",
+    )
+    parser.add_argument(
+        "--warmup-bias-lr",
+        type=float,
+        default=None,
+        help="bias LR during warmup. default.yaml=0.1, but the auto-optimizer path forces 0.0; "
+        "pass 0.0 to match a forced-MuSGD screening run to the auto-MuSGD champion.",
+    )
     args = parser.parse_args()
 
     # Pause/resume: when --resume is set, reload the run's last.pt and continue from the saved epoch.
@@ -152,6 +165,8 @@ def main() -> None:
         ("stal_expand", args.stal_expand),
         ("tal_alpha", args.tal_alpha),
         ("tal_beta", args.tal_beta),
+        ("optimizer", args.optimizer),
+        ("warmup_bias_lr", args.warmup_bias_lr),
     ):
         if val is not None:
             train_kwargs[key] = val

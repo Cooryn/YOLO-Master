@@ -2,7 +2,7 @@
 
 > **结论一句话**：adaptive STAL 显著改善小目标正样本覆盖（平均每小目标正样本 ×1.9、零正样本比例从 7.05% → 1.50%），
 > 但主指标 APs 增益有限（相对 fixed 基线 **+0.20pp**、相对纯 TAL **+0.50pp**），未达任务书「APs ≥ +1.0pp」。
-> **覆盖层面达标，AP 增益需靠 P2 超参扫描继续挖。**
+> **覆盖层面达标，AP 增益未兑现**——P2 部分扫参（topk16 -0.15pp、beta8 -0.01pp）亦无增益，项目已阶段性结项（见 [A2/README.md](../README.md)「结项结论」）。
 
 ## 三组对照（主结果）
 
@@ -106,8 +106,8 @@ python A2/P0/tiered_eval.py --weights runs/a2/p0/<name>/weights/best.pt --imgsz 
 ## 风险与降级
 
 - **Mosaic 交互**：mosaic 会改变训练目标面积，可能放大/削弱 STAL。本轮三组都用默认 `mosaic=1.0`/`close_mosaic=10`，
-  未做 Mosaic on/off 交互对照（验收口径为「至少做 baseline/STAL × Mosaic on/off」，可留 P2 补）。
+  未做 Mosaic on/off 交互对照（验收口径为「至少做 baseline/STAL × Mosaic on/off」）；至项目阶段性结项仍未做。
 - **AMP**：已由 `test_assignment_consistent_fp32_vs_amp` / `test_fg_mask_consistent_fp32_vs_amp` 核查 FP32/AMP 下
   mask、top-k、正样本数一致且有限；复现统一跑 FP32，不牺牲分配正确性。
-- **主指标未达标**：APs +0.20pp（vs fixed）远低于 ≥1.0pp，结论不能表述为「显著提升检测精度」，
-  只能表述为「正样本覆盖显著改善 + APs 小幅正收益」。P2 通过 `stal_topk_small`/`stal_expand`/α/β 扫描找增益。
+- **主指标未达标**：APs +0.20pp（vs fixed）远低于 ≥1.0pp，结论只能表述为「正样本覆盖显著改善 + APs 小幅正收益」，
+  不能表述为「显著提升检测精度」。P2 部分扫参（topk16 -0.15pp / beta8 -0.01pp）未找到增益，进一步印证此结论。
